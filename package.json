@@ -5,7 +5,7 @@
   "homepage": "https://ionicframework.com/",
   "description": "The labs used during Customer Success hosted Enterprise training sessions",
   "scripts": {
-    "build": "ng build --prod && cap copy",
+    "build": "ng test --browsers=ChromeHeadless --no-watch && ng build --prod && cap copy",
     "bump": "node scripts/bump-version.js",
     "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s",
     "e2e": "ng e2e",
@@ -81,6 +81,7 @@
     "prettier": "~2.2.1",
     "pretty-quick": "~3.1.0",
     "protractor": "~7.0.0",
+    "puppeteer": "~8.0.0",
     "rimraf": "~3.0.2",
     "semver": "~7.3.4",
     "ts-node": "~9.1.1",

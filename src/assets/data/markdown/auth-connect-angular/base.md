@@ -1,168 +1,215 @@
-# Lab: The Base Application
+# Generating the Base Application
 
-This training starts with an Ionic Framework application that uses standard `email/password` with a remote hosted server for authentication. This is a common paradigm used in web applications. In this lab, we will add SSO with Auth0 capability for authentication.
+Before we begin, we will need an application that requires authentication.
 
-## Getting Started
+```bash
+ionic start training-lab-ac tabs --type=angular --capacitor
+npm run build
+cd training-lab-ac
+npm run build
+ionic cap add android
+ionic cap add ios
+ionic g page login
+ionic g s core/tea --skipTests
+ionic g service core/unauth-interceptor --skipTests
+ionic g interface models/tea
+ionic g interface models/user
+```
 
-These instrctions assume that you have a reasonable development environment set up on your machine including `git`, `node`, `npm`, and `Android Studio`. If your are using a Mac and want to build for iOS, you should also have `Xcode`, the Xcode commandline tools, and `cocoapods`.
+That was a lot of stuff we just created. Let's go through it and fill it out a bit.
 
-To get started, perform the following actions within a working folder:
+## The `package.json` File
 
-- `git clone https://github.com/ionic-team/ac-training-starter.git`
-- `cd ac-training-starter`
-- `npm i`
-- `npm run build`
-- `npx cap update` - this may take a while
-- `npm run build`
-- `npm start` - to run in the browser
+For reasons that will b3 apparent later, we want to serve the app from port `8100`. When we build this for installation on a device we should also do so using the production environment, and automatically copy our build to the native projects.
 
-To build for installation on a device, use `npx cap open android` or `npx cap open ios`. This will open the project in the appropriate IDE. From there you can build the native application and install it on your device.
+```JSON
+  "scripts": {
+    "ng": "ng",
+    "start": "ng serve --port=8100",
+    "build": "ng build --prod && cap copy",
+    "test": "ng test",
+    "lint": "ng lint",
+    "e2e": "ng e2e"
+  },
+```
 
-## General Architecture
+Start the app using the development server at this point so we can see the changes as we make them.
 
-### Services
+## Environments
 
-Two services are related to the authentication workflow. The `AuthenticationService` handles the API calls that perform login actions. The `IdentiyService` handles the identity of the currently logged in user.
+We will bo connecting to a backend service to get some data. Let's add the base URL for that data service to the `src/environments/environment.ts` and `src/environments/environment.prod.ts` files.
 
-#### AuthenticationService
-
-The `AuthenticationService` handles the POSTs to the login endpoint. If this operation is successful it registers this fact with the `IdentityService`. This is the first of two services used in this training, so let's look at it a bit more in depth.
-
-##### Construction
-
-This service is registered with the dependency injection engine such that it is available to the whole application. This service exposes various methods that can be called to perform authentication actions. Currently, supports a `login()` action.
-
-##### `login()` - Attempt to login with email and password
-
-Makes a call to the API that will attempt to login the user using `email` and `password` credentials. If successful, the server will respond with an authentication token that we save into our identityService where it can be referenced by other parts of the application when needed. When then map the response to `true` to notify the caller that the result of the operation was successful.
+Here is the development environment file:
 
 ```TypeScript
-login(username: string, password: string): Observable<boolean> {
-    return this.http.post(`${environment.dataService}/auth/login`, {
-        username,
-        password
-    }, {
-        responseType: 'text'
-    }).pipe(
-        map(token => this.identityService.newIdentity(token)),
-        mapTo(true)
-    );
+export const environment = {
+  production: false,
+  dataService: 'https://cs-demo-api.herokuapp.com'
+};
+```
+
+The `environment.prod.ts` file will be similar except `production` will be `true`
+
+## Models
+
+We have a couple of models to define the shape of our data.
+
+**src/app/models/tea.ts**
+
+```TypeScript
+export interface Tea {
+  id: number;
+  name: string;
+  description: string;
 }
 ```
 
-#### IdentityService
-
-The `IdentityService` defines the identity of the currently logged in user including the authentication token associated with the user. This service also persists the token so it is available between sessions. This is the second service used in this training, so let's examine it feature by feature.
-
-##### Construction
-
-This service is registered with the dependency injection engine such that it is availale to the whole application. All of the data controlled by this service is private. Consumers must interact with the data via the public methods. A `changed` subject is created so other parts of the application can know when the user has changed, allowing then to requery data as needed.
+**src/app/models/user.ts**
 
 ```TypeScript
+export interface User {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+}
+```
+
+Let's create a barrel file to export our two interfaces:
+
+**src/app/models/index.ts**
+
+```TypeScript
+export * from './tea';
+export * from './user';
+```
+
+## Core Service
+
+Right now, we only have two core service, the tea service and an HTTP interceptor.
+
+**src/app/core/tea.service.ts**
+
+All that we need it to do is get some simple Tea data for us.
+
+```TypeScript
+import { HttpClient } from '@angular/common/http';
+import { Injectable } from '@angular/core';
+import { Observable } from 'rxjs';
+import { Tea } from '../models';
+import { environment } from 'src/environments/environment';
+
 @Injectable({
   providedIn: 'root'
 })
-export class IdentityService {
-  private tokenKey = 'auth-token';
-  private token: string;
-  private user: User;
+export class TeaService {
+  constructor(private http: HttpClient) {}
 
-  changed: Subject<User>;
-
-  constructor(private http: HttpClient, private storage: Storage) {
-    this.changed = new Subject();
+  getAll(): Observable<Array<Tea>> {
+    return this.http.get<Array<Tea>>(`${environment.dataService}/tea-categories`);
   }
-  ...
 }
 ```
 
-##### `set()` - Set the Current User and Token
+**src/app/core/unauth-interceptor.service.ts**
 
-The `set()` method takes a `User` object and a token. The `User` object is cached locally and the token is stored in a local storage mechanism. The `changed` subject is also fired. This method should be called as part of the login workflow.
+For this interceptor, we need to catch 401 errors and bounce the user over to the login page.
 
 ```TypeScript
-  async set(user: User, token: string): Promise<void> {
-    this.user = user;
-    await this.setToken(token);
-    this.changed.next(this.user);
+import { HttpErrorResponse, HttpEvent, HttpHandler, HttpInterceptor, HttpRequest } from '@angular/common/http';
+import { Injectable } from '@angular/core';
+import { NavController } from '@ionic/angular';
+import { Observable } from 'rxjs';
+import { tap } from 'rxjs/operators';
+
+@Injectable()
+export class UnauthInterceptor implements HttpInterceptor {
+  constructor(private navController: NavController) {}
+
+  intercept(req: HttpRequest<any>, next: HttpHandler): Observable<HttpEvent<any>> {
+    return next.handle(req).pipe(
+      tap(
+        (event: HttpEvent<any>) => {},
+        (err: any) => {
+          if (err instanceof HttpErrorResponse && err.status === 401) {
+            this.navController.navigateRoot(['/', 'login']);
+          }
+        }
+      )
+    );
   }
-```
-
-##### `get()` - Get the Current User
-
-Our API has a `users/current` endpoint that returns the `User` that is assciated with whichever authentication token is sent in the request. Our application will then do one of the following with any `get()` call:
-
-- A `User` will already be cached (either from a `set()` call or a prior `get()` call), that user will be returned
-- A `User` is not cached so we make an API call to get the user, in which case:
-  - An HTTP interceptor applies the currently stored token
-  - The call returns the user associated with that token and the user is cached
-  - If a token does not exist or is invalid, a 401 is generated by the API
-
-```TypeScript
-get(): Observable<User> {
-    if (!this.user) {
-        return this.http
-            .get<User>(`${environment.dataService}/user/current`)
-            .pipe(
-                catchError(e => of(null)),
-                tap(u => (this.user = u))
-            );
-    } else {
-        return of(this.user);
-    }
 }
 ```
 
-This allows our application to retrieve information about the currently logged in user after a restart. This method could be called as part of the bootstrap workflow or at any other time that data about the currently logged in user is required.
+Let's create a barrel file here too:
 
-##### `getToken()` - Get the Current Token
-
-The `getToken()` method returns the currently set token. If no token is currently set, it attempts to retrieve a token from a local storage mechanism.
+**src/app/models/index.ts**
 
 ```TypeScript
-  async getToken(): Promise<string> {
-    if (!this.token) {
-      await this.storage.ready();
-      this.token = await this.storage.get(this.tokenKey);
-    }
-    return this.token;
-  }
+export * from './tea.service';
+export * from './unauth-interceptor.service';
 ```
 
-This method is most commonly used whenever an HTTP call is made so the token can be added to the headers of the call. In this application, the logic that performs that action has been abstracted into an HTTP interceptor.
+## Configure the Application
 
-##### `remove()` - Remove the User and the Token
+In order to effectively make HTTP calls, we need to import the HTTP Client Module and provide our 401 interceptor. This is done via the `src/app/app.module.ts` file.
 
-The user and the token are removed from memory and from the local storage mechanism.
+- Add `HttpClientModule` to the `imports`
+- Add `UnauthInterceptor` to the `providers`
 
 ```TypeScript
-  async remove(): Promise<void> {
-    this.user = undefined;
-    await this.setToken('');
-    this.changed.next(this.user);
-  }
+  imports: [BrowserModule, HttpClientModule, IonicModule.forRoot(), AppRoutingModule],
+  providers: [
+    { provide: HTTP_INTERCEPTORS, useClass: UnauthInterceptor, multi: true },
+    { provide: RouteReuseStrategy, useClass: IonicRouteStrategy }
+  ],
 ```
 
-This method should be called as part of the login workflow.
+Be sure and add the ES6 imports as well if your editor did not do so for you automatically.
 
-### Additional Classes
+## Get Tea Data
 
-#### AuthInterceptor
+At this point, we can get to each page in our application, but we aren't trying to fetch data from the backend. Let's see what happens when we try that. We will use `tab2` for that.
 
-This HTTP Interceptor adds the authentication token to the outgoing requests that require a token. For this application, that is every request that is not itself the `login` request.
+**src/app/tab2/tab2.page.ts**
 
-#### LoggedInGuard
+```TypeScript
+import { Component } from '@angular/core';
+import { TeaService } from '../core';
+import { Tea } from '../models/tea';
 
-This guard is attached to routes that we want to only allow access to when the user is authenticated. If the user is not authenticated, they will be redirected to the login page.
+@Component({
+  selector: 'app-tab2',
+  templateUrl: 'tab2.page.html',
+  styleUrls: ['tab2.page.scss']
+})
+export class Tab2Page {
+  teas: Array<Tea> = [];
 
-### Application Workflow
+  constructor(private teaService: TeaService) {}
 
-#### Startup
+  ionViewDidEnter() {
+    this.teaService.getAll().subscribe(t => (this.teas = t));
+  }
+}
+```
 
-Upon starting up, the application attempts to load the `HomePage`. Three scenarios are possible at this point:
+In the view, replace the `app-explore-container` with the following markup:
 
-- A valid token has been stored from a previous session and the User data is available
-- A token has been stored from a previous session but is invalid and will not load the User data
-- A token has not been stored from a previous session
+**src/app/tab2/tab2.page.html**
 
-In the first scenario, the `HomePage` successfully loads and displays the username of the current user. In the last two scenarios, the system will be unable to restore the user data from the server and the `LoggedInGuard` will prevent the user from accessing any secured pages and redirect them to the login page.
+```html
+<ion-list>
+  <ion-item *ngFor="let tea of teas">
+    <ion-label>{{ tea.name }}</ion-label>
+  </ion-item>
+</ion-list>
+```
+
+## Conclusion
+
+At this point, you should be able to navigate to tabs 1 and 3, but as soon as you attempt to navigate to tab 2 you should get a 401 error and get redirected to the login page. At this point you are stuck unless you do a little URL hacking.
+
+Build the app for your mobile device and try running it there. Verify that you get the same results.
+
+The problem is that we need to authenticate the user and then give the access token to our backend when we try to get the teas. Let's do that next.'
